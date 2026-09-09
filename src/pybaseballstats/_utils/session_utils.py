@@ -136,15 +136,11 @@ class PBSSessionManager:
             return True
         # Cloudflare challenges often return 200 but contain specific text
         text = response.text.lower()
-        if (
-            "just a moment" in text
-            or "attention required" in text
-            or "cloudflare" in text
-        ):
+        if "just a moment" in text or "attention required" in text:
             return True
         return False
 
-    def _solve_cloudflare_challenge(self, url: str) -> None:
+    def _solve_cloudflare_challenge(self, url: str) -> requests.Response | None:
         """Spin up an ephemeral, stealthed Playwright instance to bypass Cloudflare."""
         if self.verbose:
             print(f"\n[DEBUG] === Initiating Cloudflare Bypass for {url} ===")
@@ -309,11 +305,16 @@ class PBSSessionManager:
                         )
                     if self.verbose:
                         print("[DEBUG] === Bypass Process Complete ===\n")
+                    response = requests.Response()
+                    response.url = page.url
+                    response.content = page.content().encode("utf-8")
+                    return response
 
         except PlaywrightTimeoutError:
             print("\n[ERROR] Playwright timed out completely.")
         except Exception as e:
             print(f"\n[ERROR] Critical failure: {e}")
+        return None
 
     def get(self, url: str, **kwargs: Any) -> requests.Response | None:
         """Make an HTTP request with automatic Waterfall escalation."""
@@ -326,12 +327,9 @@ class PBSSessionManager:
             # Check for block
             if self._is_cloudflare_challenge(resp):
                 # ATTEMPT 2: The Waterfall Escalation
-                with self._lock:
-                    self._solve_cloudflare_challenge(url)
-
-                # Retry the fast request now that our session has the cf_clearance cookie
                 self._rate_limit()
-                resp = self.session.get(url, impersonate="chrome120", **kwargs)
+                with self._lock:
+                    return self._solve_cloudflare_challenge(url)
 
             resp.raise_for_status()
             return resp
