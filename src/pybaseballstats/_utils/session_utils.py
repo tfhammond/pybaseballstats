@@ -7,6 +7,9 @@ from typing import Any, Generic, TypeVar
 
 from curl_cffi import requests
 from playwright.sync_api import (
+    Response as PlaywrightResponse,
+)
+from playwright.sync_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 from playwright.sync_api import (
@@ -164,6 +167,16 @@ class PBSSessionManager:
                     viewport={"width": 1280, "height": 720},
                 )
                 page = context.new_page()
+                page_statuses: list[int] = []
+
+                def capture_status(response: PlaywrightResponse) -> None:
+                    if (
+                        response.request.is_navigation_request()
+                        and response.frame == page.main_frame
+                    ):
+                        page_statuses.append(response.status)
+
+                page.on("response", capture_status)
 
                 if self.verbose:
                     print("[DEBUG] Navigating to target URL...")
@@ -305,9 +318,15 @@ class PBSSessionManager:
                         )
                     if self.verbose:
                         print("[DEBUG] === Bypass Process Complete ===\n")
+                    if not page_statuses:
+                        return None
+                    page_status = page_statuses[-1]
                     response = requests.Response()
                     response.url = page.url
+                    response.status_code = page_status
+                    response.ok = 200 <= page_status < 400
                     response.content = page.content().encode("utf-8")
+                    response.raise_for_status()
                     return response
 
         except PlaywrightTimeoutError:
