@@ -7,6 +7,9 @@ from typing import Any, Generic, TypeVar
 
 from curl_cffi import requests
 from playwright.sync_api import (
+    Response as PlaywrightResponse,
+)
+from playwright.sync_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 from playwright.sync_api import (
@@ -136,15 +139,11 @@ class PBSSessionManager:
             return True
         # Cloudflare challenges often return 200 but contain specific text
         text = response.text.lower()
-        if (
-            "just a moment" in text
-            or "attention required" in text
-            or "cloudflare" in text
-        ):
+        if "just a moment" in text or "attention required" in text:
             return True
         return False
 
-    def _solve_cloudflare_challenge(self, url: str) -> None:
+    def _solve_cloudflare_challenge(self, url: str) -> requests.Response | None:
         """Spin up an ephemeral, stealthed Playwright instance to bypass Cloudflare."""
         if self.verbose:
             print(f"\n[DEBUG] === Initiating Cloudflare Bypass for {url} ===")
@@ -168,6 +167,16 @@ class PBSSessionManager:
                     viewport={"width": 1280, "height": 720},
                 )
                 page = context.new_page()
+                page_statuses: list[int] = []
+
+                def capture_status(response: PlaywrightResponse) -> None:
+                    if (
+                        response.request.is_navigation_request()
+                        and response.frame == page.main_frame
+                    ):
+                        page_statuses.append(response.status)
+
+                page.on("response", capture_status)
 
                 if self.verbose:
                     print("[DEBUG] Navigating to target URL...")
@@ -309,11 +318,22 @@ class PBSSessionManager:
                         )
                     if self.verbose:
                         print("[DEBUG] === Bypass Process Complete ===\n")
+                    if not page_statuses:
+                        return None
+                    page_status = page_statuses[-1]
+                    response = requests.Response()
+                    response.url = page.url
+                    response.status_code = page_status
+                    response.ok = 200 <= page_status < 400
+                    response.content = page.content().encode("utf-8")
+                    response.raise_for_status()
+                    return response
 
         except PlaywrightTimeoutError:
             print("\n[ERROR] Playwright timed out completely.")
         except Exception as e:
             print(f"\n[ERROR] Critical failure: {e}")
+        return None
 
     def get(self, url: str, **kwargs: Any) -> requests.Response | None:
         """Make an HTTP request with automatic Waterfall escalation."""
@@ -326,12 +346,9 @@ class PBSSessionManager:
             # Check for block
             if self._is_cloudflare_challenge(resp):
                 # ATTEMPT 2: The Waterfall Escalation
-                with self._lock:
-                    self._solve_cloudflare_challenge(url)
-
-                # Retry the fast request now that our session has the cf_clearance cookie
                 self._rate_limit()
-                resp = self.session.get(url, impersonate="chrome120", **kwargs)
+                with self._lock:
+                    return self._solve_cloudflare_challenge(url)
 
             resp.raise_for_status()
             return resp
